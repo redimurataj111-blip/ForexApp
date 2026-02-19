@@ -1,0 +1,2 @@
+# ForexApp
+sentimental analyses
