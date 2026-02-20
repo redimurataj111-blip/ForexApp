@@ -1625,10 +1625,32 @@ def aggregate_all_signals(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_ana
             signals["confidence"] = 0
         
         return signals
-    
     except Exception as e:
         signals["error"] = str(e)
         return signals
+
+
+# Cached helper: compute a compact summary for a given timeframe
+@st.cache_data(ttl=120)
+def compute_tf_summary(tf_key: str, news_items: list, cal_events: list) -> dict:
+    """Return a short summary (verdict + confidence) for the given TF key using cached fetchers."""
+    try:
+        # Fetch price and DXY for this timeframe (cached by get_price_data/get_dxy_data)
+        eur = get_price_data(tf_key)
+        dxy = get_dxy_data(tf_key)
+        dxy_an = analyze_dxy(dxy) if dxy is not None and not dxy.empty else {}
+        conf = evaluate_confluence_factors(eur, dxy, dxy_an, cal_events) if not eur.empty and not dxy.empty else {}
+        agg = aggregate_all_signals(eur, dxy, dxy_an, news_items, cal_events, conf) if not eur.empty else {"overall_verdict":"NO DATA","confidence":0}
+        return {
+            "tf": tf_key,
+            "verdict": agg.get("overall_verdict", "NO DATA"),
+            "confidence": agg.get("confidence", 0),
+            "bullish": agg.get("bullish_count", 0),
+            "bearish": agg.get("bearish_count", 0),
+            "neutral": agg.get("neutral_count", 0),
+        }
+    except Exception as e:
+        return {"tf": tf_key, "verdict": "ERROR", "confidence": 0, "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2627,13 +2649,44 @@ with cols[0]:
 for i, tf_opt in enumerate(tf_options):
     with cols[i + 1]:
         if st.button(tf_opt, key=f"tf_{tf_opt}", use_container_width=True):
+            # Change timeframe without clearing the entire cache to avoid
+            # re-downloading all timeframes and long load times.
             st.session_state.tf = tf_opt
-            st.cache_data.clear()
             st.rerun()
 with cols[-1]:
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+
+# Fast-load toggle: when enabled, the app limits heavy downloads and only loads core TFs on demand
+fast_mode = st.checkbox("Fast loading mode (recommended)", value=True)
+
+# Per-timeframe summaries (lightweight - core TFs)
+st.markdown("### ⏱️ Timeframe Summaries (quick)")
+tf_summary_cols = st.columns(4)
+core_tfs = ["1H", "4H", "D"]
+for i, tfk in enumerate(core_tfs):
+    with tf_summary_cols[i % 4]:
+        s = compute_tf_summary(tfk, news_items if 'news_items' in globals() else [], cal_events if 'cal_events' in globals() else [])
+        color = "#3fb950" if "BULL" in s.get("verdict", "") else ("#e74c3c" if "BEAR" in s.get("verdict", "") else "#8b949e")
+        st.markdown(f"""
+        <div style="background:#1e2233;border:1px solid #2e3347;border-radius:6px;padding:8px;text-align:center;">
+          <div style="font-size:0.95rem;font-weight:700;color:{color};">{s.get('verdict','NO DATA')}</div>
+          <div style="font-size:0.75rem;color:#8b949e;margin-top:6px;">TF: {tfk} • Confidence: {s.get('confidence',0):.0f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+if not fast_mode:
+    # If user disables fast mode, compute summaries for all available TFs on demand
+    if st.button("Compute summaries for all timeframes (may be slow)"):
+        all_cols = st.columns(4)
+        results = []
+        for i, key in enumerate(TF_MAP.keys()):
+            res = compute_tf_summary(key, news_items if 'news_items' in globals() else [], cal_events if 'cal_events' in globals() else [])
+            results.append(res)
+            with all_cols[i % 4]:
+                color = "#3fb950" if "BULL" in res.get("verdict", "") else ("#e74c3c" if "BEAR" in res.get("verdict", "") else "#8b949e")
+                st.markdown(f"<div style='background:#1e2233;border:1px solid #2e3347;border-radius:6px;padding:8px;text-align:center;'><div style='font-weight:700;color:{color};'>{res.get('tf')} — {res.get('verdict')}</div><div style='font-size:0.75rem;color:#8b949e;'>Confidence: {res.get('confidence',0):.0f}%</div></div>", unsafe_allow_html=True)
 
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  3-TIMEFRAME STACK ANALYSIS (Daily/4H/1H) - MULTI-TIMEFRAME CONFLUENCE  ║
