@@ -1737,7 +1737,9 @@ def summarize_timeframes(timeframes=None):
 # BACKTESTING ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysis_func, 
-                      confluence_func, lookback_days: int = 30, require_master_match: bool = False) -> dict:
+                      confluence_func, lookback_days: int = 30, require_master_match: bool = False,
+                      force_long: bool = False, invert_dxy: bool = False,
+                      fixed_tp_pips: float = None, fixed_sl_pips: float = None) -> dict:
     """
     Backtests the confluence-based swing trading strategy.
     Returns trade history, stats, and equity curve.
@@ -1831,6 +1833,17 @@ def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysi
                 master_sig_val = master_sig_obj.get("signal", "NEUTRAL")
             except Exception:
                 master_sig_val = "NEUTRAL"
+            # Effective DXY trend (allow inversion if requested)
+            dxy_trend_raw = dxy_analysis_result.get("trend", "NEUTRAL")
+            if invert_dxy:
+                if dxy_trend_raw == "UPTREND":
+                    dxy_trend_effective = "DOWNTREND"
+                elif dxy_trend_raw == "DOWNTREND":
+                    dxy_trend_effective = "UPTREND"
+                else:
+                    dxy_trend_effective = dxy_trend_raw
+            else:
+                dxy_trend_effective = dxy_trend_raw
             
             # EXIT LOGIC
             if in_trade:
@@ -2015,49 +2028,84 @@ def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysi
             
             # ENTRY LOGIC
             if not in_trade and (confluence_score >= 4):
-                dxy_trend = dxy_analysis_result.get("trend", "NEUTRAL")
-
-                # Require master signal to match trade direction if requested
-                if require_master_match:
-                    if dxy_trend == "DOWNTREND" and master_sig_val != "BULLISH":
-                        continue
-                    if dxy_trend == "UPTREND" and master_sig_val != "BEARISH":
-                        continue
-
-                # Generate entry based on DXY bias
-                if dxy_trend == "DOWNTREND":  # EUR/USD Bullish
+                # If forced long mode is enabled, open long when confluence met (bypass master check)
+                if force_long:
                     entry_price = current_price
                     entry_type = "long"
                     entry_date = current_date
-
-                    # Calculate stops and targets
-                    atr_val = atr(window_eurusd, 14)
-                    atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
-                    low_50 = float(window_eurusd["Low"].iloc[-50:].min())
-
-                    stop_loss = low_50 - (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0030
-                    target1 = entry_price + (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0040
-                    target2 = entry_price + (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0080
-
+                    # Optional: use fixed TP/SL in pips for quick experiments
+                    if fixed_tp_pips is not None and fixed_sl_pips is not None:
+                        stop_loss = entry_price - (fixed_sl_pips * 0.0001)
+                        target1 = entry_price + (fixed_tp_pips * 0.0001)
+                        target2 = entry_price + (fixed_tp_pips * 2 * 0.0001)
+                    else:
+                        atr_val = atr(window_eurusd, 14)
+                        atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
+                        low_50 = float(window_eurusd["Low"].iloc[-50:].min()) if len(window_eurusd) >= 50 else float(window_eurusd["Low"].min())
+                        stop_loss = low_50 - (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0030
+                        target1 = entry_price + (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0040
+                        target2 = entry_price + (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0080
                     in_trade = True
-                    # reset management trackers
                     position_size = 1.0
                     partial1_done = False
                     partial2_done = False
                     break_even_set = False
+                else:
+                    dxy_trend = dxy_trend_effective
 
-                elif dxy_trend == "UPTREND":  # EUR/USD Bearish
-                    entry_price = current_price
-                    entry_type = "short"
-                    entry_date = current_date
+                    # Require master signal to match trade direction if requested
+                    if require_master_match:
+                        if dxy_trend == "DOWNTREND" and master_sig_val != "BULLISH":
+                            continue
+                        if dxy_trend == "UPTREND" and master_sig_val != "BEARISH":
+                            continue
 
-                    atr_val = atr(window_eurusd, 14)
-                    atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
-                    high_50 = float(window_eurusd["High"].iloc[-50:].max())
+                    # Generate entry based on DXY bias
+                    if dxy_trend == "DOWNTREND":  # EUR/USD Bullish
+                        entry_price = current_price
+                        entry_type = "long"
+                        entry_date = current_date
 
-                    stop_loss = high_50 + (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0030
-                    target1 = entry_price - (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0040
-                    target2 = entry_price - (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0080
+                        # Calculate stops and targets
+                        # Optional fixed TP/SL
+                        if fixed_tp_pips is not None and fixed_sl_pips is not None:
+                            stop_loss = entry_price - (fixed_sl_pips * 0.0001)
+                            target1 = entry_price + (fixed_tp_pips * 0.0001)
+                            target2 = entry_price + (fixed_tp_pips * 2 * 0.0001)
+                        else:
+                            atr_val = atr(window_eurusd, 14)
+                            atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
+                            low_50 = float(window_eurusd["Low"].iloc[-50:].min())
+
+                            stop_loss = low_50 - (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0030
+                            target1 = entry_price + (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0040
+                            target2 = entry_price + (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0080
+
+                        in_trade = True
+                        # reset management trackers
+                        position_size = 1.0
+                        partial1_done = False
+                        partial2_done = False
+                        break_even_set = False
+
+                    elif dxy_trend == "UPTREND":  # EUR/USD Bearish
+                        entry_price = current_price
+                        entry_type = "short"
+                        entry_date = current_date
+
+                        # Optional fixed TP/SL for shorts
+                        if fixed_tp_pips is not None and fixed_sl_pips is not None:
+                            stop_loss = entry_price + (fixed_sl_pips * 0.0001)
+                            target1 = entry_price - (fixed_tp_pips * 0.0001)
+                            target2 = entry_price - (fixed_tp_pips * 2 * 0.0001)
+                        else:
+                            atr_val = atr(window_eurusd, 14)
+                            atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
+                            high_50 = float(window_eurusd["High"].iloc[-50:].max())
+
+                            stop_loss = high_50 + (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0030
+                            target1 = entry_price - (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0040
+                            target2 = entry_price - (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0080
 
                     in_trade = True
                     position_size = 1.0
@@ -2608,10 +2656,41 @@ def perf_color(v, suffix=""):
 if os.environ.get("RUN_BACKTEST") == "1":
     tf_env = os.environ.get("BACKTEST_TF", "1H")
     lookback = int(os.environ.get("LOOKBACK_DAYS", "30"))
-    print(f"Running headless backtest for {tf_env} (lookback {lookback}d)", file=sys.stderr)
+    mode = os.environ.get("BACKTEST_MODE", "NORMAL").upper()
+    # Map mode to flags
+    require_master = True
+    force_long = False
+    invert_dxy = False
+    if mode == "LONG_ONLY":
+        require_master = False
+        force_long = True
+    elif mode == "INVERT_DXY":
+        require_master = True
+        invert_dxy = True
+    elif mode == "IGNORE_MASTER":
+        require_master = False
+
+    print(f"Running headless backtest for {tf_env} (lookback {lookback}d) mode={mode}", file=sys.stderr)
     df_bt = get_price_data(tf_env)
     dxy_bt = get_dxy_data(tf_env)
-    res = backtest_strategy(df_bt, dxy_bt, analyze_dxy, evaluate_confluence_factors, lookback_days=lookback, require_master_match=True)
+    # Optional fixed TP/SL (pips) for experimentation - set env FIXED_TP_PIPS=45 FIXED_SL_PIPS=30
+    fixed_tp = os.environ.get("FIXED_TP_PIPS")
+    fixed_sl = os.environ.get("FIXED_SL_PIPS")
+    try:
+        fixed_tp_val = float(fixed_tp) if fixed_tp is not None else None
+    except Exception:
+        fixed_tp_val = None
+    try:
+        fixed_sl_val = float(fixed_sl) if fixed_sl is not None else None
+    except Exception:
+        fixed_sl_val = None
+
+    res = backtest_strategy(
+        df_bt, dxy_bt, analyze_dxy, evaluate_confluence_factors,
+        lookback_days=lookback, require_master_match=require_master,
+        force_long=force_long, invert_dxy=invert_dxy,
+        fixed_tp_pips=fixed_tp_val, fixed_sl_pips=fixed_sl_val
+    )
     print(json.dumps(res, default=str))
     sys.exit(0)
 
@@ -2661,10 +2740,30 @@ confluence_analysis = evaluate_confluence_factors(df, dxy_df, dxy_an, cal_events
 # Aggregate all signals from all sources
 all_signals = aggregate_all_signals(df, dxy_df, dxy_an, news_items, cal_events, confluence_analysis)
 
-# Run backtest (toggle to require master signal to match trade direction)
-require_master_ui = st.sidebar.checkbox("Require MASTER SIGNAL to match entry", value=True,
-                                       help="When checked, backtest will only open trades if MASTER SIGNAL agrees with the trade direction")
-backtest_result = backtest_strategy(df, dxy_df, analyze_dxy, evaluate_confluence_factors, lookback_days=30, require_master_match=require_master_ui)
+# Run backtest (trading mode selector)
+trade_mode = st.sidebar.selectbox(
+    "Trading Mode",
+    options=[
+        "Normal (MASTER+Confluence required)",
+        "Long-only (force long entries when confluence met)",
+        "Invert DXY polarity (open long on DXY UPTREND)",
+        "Ignore MASTER SIGNAL (use confluence only)",
+    ],
+    index=0,
+    help="Choose trading behavior. Normal enforces MASTER signal when required; other modes alter entry rules.",
+)
+
+require_master_ui = (trade_mode == "Normal (MASTER+Confluence required)")
+force_long_ui = (trade_mode == "Long-only (force long entries when confluence met)")
+invert_dxy_ui = (trade_mode == "Invert DXY polarity (open long on DXY UPTREND)")
+
+backtest_result = backtest_strategy(
+    df, dxy_df, analyze_dxy, evaluate_confluence_factors,
+    lookback_days=30,
+    require_master_match=require_master_ui,
+    force_long=force_long_ui,
+    invert_dxy=invert_dxy_ui,
+)
 
 # Determine setup bias based on DXY trend
 setup_bias = "bullish" if dxy_an.get("trend") == "DOWNTREND" else "bearish"
