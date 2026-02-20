@@ -9,6 +9,9 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import pytz
 import re
+import os
+import sys
+import json
 
 st.set_page_config(layout="wide", page_title="EUR/USD + DXY Signals", page_icon="📈")
 
@@ -1678,8 +1681,10 @@ def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysi
         df_test = eurusd_df[eurusd_df["dt"] >= cutoff_date].reset_index(drop=True)
         dxy_test = dxy_df[dxy_df["dt"] >= cutoff_date].reset_index(drop=True)
         
-        if len(df_test) < 50 or len(dxy_test) < 50:
-            return {"error": f"Not enough data in {lookback_days} days"}
+        # Allow lower-frequency timeframes (daily/monthly) by using an adaptive minimum
+        min_len_required = 12  # require at least ~12 candles for any sensible backtest
+        if len(df_test) < min_len_required or len(dxy_test) < min_len_required:
+            return {"error": f"Not enough data in {lookback_days} days (need >= {min_len_required} candles)"}
         
         in_trade = False
         entry_price = 0.0
@@ -1694,8 +1699,9 @@ def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysi
         partial2_done = False
         break_even_set = False
         
-        # Sliding window analysis
-        for i in range(50, len(df_test)):
+        # Sliding window analysis - adaptive start index based on available data
+        start_idx = min(50, max(10, int(len(df_test) * 0.2)))
+        for i in range(start_idx, len(df_test)):
             current_date = df_test.iloc[i]["dt"]
             current_price = float(df_test.iloc[i]["Close"])
             high = float(df_test.iloc[i]["High"])
@@ -2508,6 +2514,17 @@ def perf_color(v, suffix=""):
 # ══════════════════════════════════════════════════════════════════════════════
 # STATE + DATA LOAD
 # ══════════════════════════════════════════════════════════════════════════════
+# Headless backtest runner (invoke with env RUN_BACKTEST=1)
+if os.environ.get("RUN_BACKTEST") == "1":
+    tf_env = os.environ.get("BACKTEST_TF", "1H")
+    lookback = int(os.environ.get("LOOKBACK_DAYS", "30"))
+    print(f"Running headless backtest for {tf_env} (lookback {lookback}d)", file=sys.stderr)
+    df_bt = get_price_data(tf_env)
+    dxy_bt = get_dxy_data(tf_env)
+    res = backtest_strategy(df_bt, dxy_bt, analyze_dxy, evaluate_confluence_factors, lookback_days=lookback)
+    print(json.dumps(res, default=str))
+    sys.exit(0)
+
 if "tf" not in st.session_state:
     st.session_state.tf = "1H"
 
