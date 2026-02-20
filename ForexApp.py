@@ -1656,11 +1656,88 @@ def compute_tf_summary(tf_key: str, news_items: list, cal_events: list) -> dict:
         return {"tf": tf_key, "verdict": "ERROR", "confidence": 0, "error": str(e)}
 
 
+def summarize_timeframes(timeframes=None):
+    """
+    Return a compact summary for each timeframe in `timeframes`.
+    For each TF it reports:
+      - entry_signal: Donchian breakout or rejection (BULLISH/BEARISH/NEUTRAL)
+      - master_signal: result from `generate_master_signal` (BULLISH/BEARISH/NEUTRAL)
+      - confluence: confluence score + setup quality from `evaluate_confluence_factors`
+      - tf_summary: high-level verdict/confidence from `compute_tf_summary`
+    """
+    if timeframes is None:
+        timeframes = ["15M", "1H", "4H", "D"]
+
+    summaries = {}
+    # fetch shared calendar + news once
+    cal_events = get_calendar()
+    news_items = get_news()
+
+    for tf in timeframes:
+        try:
+            eur = get_price_data(tf)
+            dxy = get_dxy_data(tf)
+        except Exception as e:
+            summaries[tf] = {"error": f"data fetch failed: {str(e)}"}
+            continue
+
+        # Entry signal detection (Donchian breakout or recent rejection)
+        entry_sig = "NEUTRAL"
+        try:
+            if not eur.empty and len(eur) > 5:
+                upper, lower, _ = donchian_channel(eur, 20)
+                current = float(eur["Close"].iloc[-1])
+                if current > float(upper.iloc[-2]):
+                    entry_sig = "BULLISH"
+                elif current < float(lower.iloc[-2]):
+                    entry_sig = "BEARISH"
+                else:
+                    rej = detect_rejection_candles(eur, lookback=5)
+                    if rej.get("count", 0) > 0:
+                        last = rej["patterns"][-1]
+                        entry_sig = "BULLISH" if last.get("signal") in ("BULLISH", "BULL") else ("BEARISH" if last.get("signal") in ("BEARISH", "BEAR") else "NEUTRAL")
+        except Exception:
+            entry_sig = "NEUTRAL"
+
+        # DXY master signal (leading)
+        try:
+            dxy_an = analyze_dxy(dxy) if dxy is not None and not dxy.empty else {}
+            master = generate_master_signal(dxy_an, news_items, cal_events)
+            master_sig = master.get("signal", "NEUTRAL")
+        except Exception:
+            master_sig = "NEUTRAL"
+
+        # Confluence factors
+        try:
+            conf = evaluate_confluence_factors(eur, dxy, dxy_an, cal_events) if not eur.empty and not dxy.empty else {"confluence_score": 0, "setup_quality": "NO DATA"}
+            conf_score = conf.get("confluence_score", 0)
+            setup_quality = conf.get("setup_quality", "")
+        except Exception:
+            conf_score = 0
+            setup_quality = "ERROR"
+
+        # TF summary (verdict + confidence)
+        try:
+            tfsum = compute_tf_summary(tf, news_items, cal_events)
+        except Exception:
+            tfsum = {"verdict": "NO DATA", "confidence": 0}
+
+        summaries[tf] = {
+            "entry_signal": entry_sig,
+            "master_signal": master_sig,
+            "confluence_score": conf_score,
+            "setup_quality": setup_quality,
+            "tf_summary": tfsum,
+        }
+
+    return summaries
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BACKTESTING ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysis_func, 
-                      confluence_func, lookback_days: int = 30) -> dict:
+                      confluence_func, lookback_days: int = 30, require_master_match: bool = False) -> dict:
     """
     Backtests the confluence-based swing trading strategy.
     Returns trade history, stats, and equity curve.
@@ -1748,6 +1825,12 @@ def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysi
                 "met_factors": met_factors,
                 "in_trade": in_trade,
             })
+            # Compute master signal for this point in time (used if require_master_match=True)
+            try:
+                master_sig_obj = generate_master_signal(dxy_analysis_result, get_news(), get_calendar())
+                master_sig_val = master_sig_obj.get("signal", "NEUTRAL")
+            except Exception:
+                master_sig_val = "NEUTRAL"
             
             # EXIT LOGIC
             if in_trade:
@@ -1933,42 +2016,49 @@ def backtest_strategy(eurusd_df: pd.DataFrame, dxy_df: pd.DataFrame, dxy_analysi
             # ENTRY LOGIC
             if not in_trade and (confluence_score >= 4):
                 dxy_trend = dxy_analysis_result.get("trend", "NEUTRAL")
-                
+
+                # Require master signal to match trade direction if requested
+                if require_master_match:
+                    if dxy_trend == "DOWNTREND" and master_sig_val != "BULLISH":
+                        continue
+                    if dxy_trend == "UPTREND" and master_sig_val != "BEARISH":
+                        continue
+
                 # Generate entry based on DXY bias
                 if dxy_trend == "DOWNTREND":  # EUR/USD Bullish
                     entry_price = current_price
                     entry_type = "long"
                     entry_date = current_date
-                    
+
                     # Calculate stops and targets
                     atr_val = atr(window_eurusd, 14)
                     atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
                     low_50 = float(window_eurusd["Low"].iloc[-50:].min())
-                    
+
                     stop_loss = low_50 - (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0030
                     target1 = entry_price + (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0040
                     target2 = entry_price + (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0080
-                    
+
                     in_trade = True
                     # reset management trackers
                     position_size = 1.0
                     partial1_done = False
                     partial2_done = False
                     break_even_set = False
-                
+
                 elif dxy_trend == "UPTREND":  # EUR/USD Bearish
                     entry_price = current_price
                     entry_type = "short"
                     entry_date = current_date
-                    
+
                     atr_val = atr(window_eurusd, 14)
                     atr_pips = float(atr_val.iloc[-1]) * 10000 if not pd.isna(atr_val.iloc[-1]) else 50
                     high_50 = float(window_eurusd["High"].iloc[-50:].max())
-                    
+
                     stop_loss = high_50 + (atr_val.iloc[-1] * 1.0) if not pd.isna(atr_val.iloc[-1]) else entry_price + 0.0030
                     target1 = entry_price - (atr_val.iloc[-1] * 4) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0040
                     target2 = entry_price - (atr_val.iloc[-1] * 8) if not pd.isna(atr_val.iloc[-1]) else entry_price - 0.0080
-                    
+
                     in_trade = True
                     position_size = 1.0
                     partial1_done = False
@@ -2521,8 +2611,19 @@ if os.environ.get("RUN_BACKTEST") == "1":
     print(f"Running headless backtest for {tf_env} (lookback {lookback}d)", file=sys.stderr)
     df_bt = get_price_data(tf_env)
     dxy_bt = get_dxy_data(tf_env)
-    res = backtest_strategy(df_bt, dxy_bt, analyze_dxy, evaluate_confluence_factors, lookback_days=lookback)
+    res = backtest_strategy(df_bt, dxy_bt, analyze_dxy, evaluate_confluence_factors, lookback_days=lookback, require_master_match=True)
     print(json.dumps(res, default=str))
+    sys.exit(0)
+
+# Headless summary runner (invoke with env RUN_SUMMARY=1)
+if os.environ.get("RUN_SUMMARY") == "1":
+    try:
+        tfs_env = os.environ.get("SUMMARY_TFS", "15M,1H,4H,D")
+        tfs = [x.strip() for x in tfs_env.split(",") if x.strip()]
+        out = summarize_timeframes(tfs)
+        print(json.dumps(out, default=str, indent=2))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
     sys.exit(0)
 
 if "tf" not in st.session_state:
@@ -2560,8 +2661,10 @@ confluence_analysis = evaluate_confluence_factors(df, dxy_df, dxy_an, cal_events
 # Aggregate all signals from all sources
 all_signals = aggregate_all_signals(df, dxy_df, dxy_an, news_items, cal_events, confluence_analysis)
 
-# Run backtest
-backtest_result = backtest_strategy(df, dxy_df, analyze_dxy, evaluate_confluence_factors, lookback_days=30)
+# Run backtest (toggle to require master signal to match trade direction)
+require_master_ui = st.sidebar.checkbox("Require MASTER SIGNAL to match entry", value=True,
+                                       help="When checked, backtest will only open trades if MASTER SIGNAL agrees with the trade direction")
+backtest_result = backtest_strategy(df, dxy_df, analyze_dxy, evaluate_confluence_factors, lookback_days=30, require_master_match=require_master_ui)
 
 # Determine setup bias based on DXY trend
 setup_bias = "bullish" if dxy_an.get("trend") == "DOWNTREND" else "bearish"
@@ -3170,13 +3273,46 @@ else:
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("## 🎯 MASTER SIGNAL SUMMARY — EUR/USD Market Prediction")
 
-# Get verdict and confidence
-verdict = all_signals.get("overall_verdict", "NO DATA")
-confidence = all_signals.get("confidence", 0)
-bullish_count = all_signals.get("bullish_count", 0)
-bearish_count = all_signals.get("bearish_count", 0)
-neutral_count = all_signals.get("neutral_count", 0)
-total_signals = all_signals.get("signal_count", 0)
+# Consolidate A–C into a single final verdict for the current timeframe (`tf`)
+try:
+    tf_summary_map = summarize_timeframes([tf])
+    tf_sum = tf_summary_map.get(tf, {})
+    entry_sig = tf_sum.get("entry_signal", "NEUTRAL")
+    master_sig_val = tf_sum.get("master_signal", "NEUTRAL")
+    conf_score = int(tf_sum.get("confluence_score", 0))
+    setup_quality = tf_sum.get("setup_quality", "NO DATA")
+    tfsum = tf_sum.get("tf_summary", {})
+    tfs_conf = tfsum.get("confidence", 0)
+except Exception:
+    entry_sig = "NEUTRAL"
+    master_sig_val = "NEUTRAL"
+    conf_score = 0
+    setup_quality = "NO DATA"
+    tfs_conf = 0
+
+# Final consolidation rules (A–C → D)
+final_verdict = "NEUTRAL"
+final_confidence = tfs_conf
+if entry_sig == master_sig_val and entry_sig != "NEUTRAL" and conf_score >= 4:
+    final_verdict = entry_sig + " (ALL ALIGNED)"
+elif master_sig_val != "NEUTRAL" and conf_score >= 4:
+    final_verdict = master_sig_val + " (MASTER + CONFLUENCE)"
+elif entry_sig != "NEUTRAL" and conf_score >= 4:
+    final_verdict = entry_sig + " (ENTRY + CONFLUENCE)"
+elif master_sig_val != "NEUTRAL":
+    final_verdict = master_sig_val + " (MASTER ONLY)"
+elif entry_sig != "NEUTRAL":
+    final_verdict = entry_sig + " (ENTRY ONLY)"
+else:
+    final_verdict = "NEUTRAL"
+
+# Use consolidated final instead of the earlier many-signal aggregation
+verdict = final_verdict
+confidence = final_confidence
+bullish_count = 1 if "BULL" in final_verdict else 0
+bearish_count = 1 if "BEAR" in final_verdict else 0
+neutral_count = 1 if final_verdict == "NEUTRAL" else 0
+total_signals = 1
 
 # Color based on verdict
 if "BULLISH" in verdict and "SLIGHT" not in verdict:
