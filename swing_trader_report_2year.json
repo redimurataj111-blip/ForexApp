@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-02-21T01:44:08.401145",
+  "current_signals": {
+    "combined_signal": "NEUTRAL",
+    "confidence": 0,
+    "confluence": false,
+    "dxy_bias": "NEUTRAL",
+    "dxy_strength": 0.5669571918801044,
+    "price_action": "NEUTRAL",
+    "price_action_confidence": 0,
+    "entry_type": null,
+    "current_eurusd_price": 3.1486500204069965,
+    "current_dxy_price": 74.82917867297235,
+    "dxy_adx": 18.52434959071297
+  },
+  "signal_summary": {
+    "total_signals": 9,
+    "bullish_signals": 0,
+    "bearish_signals": 0,
+    "neutral_signals": 9,
+    "bullish_pct": 0.0,
+    "bearish_pct": 0.0,
+    "neutral_pct": 100.0,
+    "long_ready": false
+  },
+  "backtest": {
+    "total_trades": 275,
+    "wins": 175,
+    "losses": 100,
+    "win_rate": 63.63636363636363,
+    "avg_win_pips": 30.000000000000508,
+    "avg_loss_pips": -104.23195281315029,
+    "profit_factor": 0.5036843173620105,
+    "total_pnl_pips": -5173.195281314926,
+    "max_drawdown": 5.260039257760908,
+    "final_equity": 948.2680471868443
+  }
+}
